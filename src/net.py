@@ -11,6 +11,7 @@ from utils.get_data import CUBDataLoader
 sys.path.append('/home/jason/models/research/slim/')
 from nets.inception_v3 import *
 from tensorflow.contrib import slim
+from preprocessing.inception_preprocessing import *
 
 INCEPTION_CKPT = '/home/jason/models/checkpoints/inception_v3.ckpt'
 
@@ -24,7 +25,7 @@ parser.add_argument('--log_dir', type=str, default=os.path.join(CURRENT_DIR, '..
 parser.add_argument('--checkpoint', type=str, default=None)
 parser.add_argument('--unpause', action='store_true', default=False)
 
-parser.add_argument('--lr', type=float, default=5e-4, help='Learning rate step-size')
+parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate step-size')
 parser.add_argument('--batch_size', type=int, default=32)
 parser.add_argument('--num_max_epochs', type=int, default=100)
 parser.add_argument('--image_dim', type=int, default=(244, 244, 3))
@@ -70,9 +71,9 @@ class CNN(object):
         test_y  = tf.constant(test_y)
 
         train_data = tf.data.Dataset.from_tensor_slices((train_x, train_y))
-        train_data = train_data.map(self.preprocess_image).batch(self.batch_size)
+        train_data = train_data.map(lambda x, y: self.preprocess_image(x, y, True)).batch(self.batch_size)
         test_data  = tf.data.Dataset.from_tensor_slices((test_x, test_y))
-        test_data  = test_data.map(self.preprocess_image).batch(self.batch_size)
+        test_data  = test_data.map(lambda x, y: self.preprocess_image(x, y, False)).batch(self.batch_size)
 
         self.iterator = tf.data.Iterator.from_structure(train_data.output_types, train_data.output_shapes)
         self.next_batch = self.iterator.get_next()
@@ -80,11 +81,12 @@ class CNN(object):
         self.train_init_op = self.iterator.make_initializer(train_data)
         self.test_init_op  = self.iterator.make_initializer(test_data)
 
-    def preprocess_image(self, image_path, y):
+    def preprocess_image(self, image_path, y, is_training):
         height, width, channels = self.image_dim
         image_file    = tf.read_file(image_path)
         image_decoded = tf.image.decode_jpeg(image_file, channels=channels)
-        image_resized = tf.image.resize_images(image_decoded, [height, width])
+        #image_resized = tf.image.resize_images(image_decoded, [height, width])
+        image_resized = preprocess_image(image_decoded, height, width, is_training)
         return image_resized, y
 
     def add_placeholders(self):
@@ -103,25 +105,26 @@ class CNN(object):
         return feed_dict
 
     def add_model(self, images, is_training):
-        feats = self.get_imagenet_feats(images)
+        with tf.contrib.framework.arg_scope(inception_v3_arg_scope()):
+            logits, end_points = inception_v3(images, num_classes=200, is_training=is_training)
+        '''
+        feats = end_points['AvgPool_1a']
         feats_flat = tf.squeeze(feats)
         fc_weights = tf.get_variable('fc-weights', [2048, 200], initializer=tf.random_normal_initializer())
         logits = tf.matmul(feats_flat, fc_weights, name='fc')
+        '''
         return logits
-
-    def get_imagenet_feats(self, images):
-        with tf.contrib.framework.arg_scope(inception_v3_arg_scope()):
-            logits, end_points = inception_v3(images, num_classes=None, is_training=False)
-        return end_points['AvgPool_1a']
 
     def add_training_op(self, loss):
         with tf.name_scope('optimizer'):
             optimizer = tf.train.AdamOptimizer(self.lr)
             self.global_step = tf.train.get_or_create_global_step()
-            train_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
-            train_vars = [v for v in train_vars if ('InceptionV3' not in v.name)]
+            train_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'InceptionV3/AuxLogits')
+            train_vars += tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'InceptionV3/Logits')
+            #train_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
+            #train_vars = [v for v in train_vars if ('InceptionV3' not in v.name)]
             print('train vars:', train_vars)
-            train_op = optimizer.minimize(loss, self.global_step)#, var_list=)
+            train_op = optimizer.minimize(loss, self.global_step, var_list=train_vars)
         return train_op
 
     def add_loss_op(self, logits, y):
@@ -177,6 +180,7 @@ class CNN(object):
                     _, loss, summary, step = sess.run([self.train_op, self.loss, self.loss_summary, self.global_step], feed_dict=feed_dict)
                     ave_loss += loss
                     count    += 1.0
+                    print('batch i:', count, 'loss:', loss)
                     self.summary_writer.add_summary(summary, step)
                     losses.append(loss)
                 except tf.errors.OutOfRangeError:
@@ -227,7 +231,9 @@ if __name__ == "__main__":
         sess = tf.Session(config=config)
         cnn_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='InceptionV3')
         cnn_vars = [v for v in cnn_vars if 'Adam' not in v.name]
+        cnn_vars = [v for v in cnn_vars if 'Logits' not in v.name]
         saver    = tf.train.Saver(var_list=cnn_vars, max_to_keep=5)
         sess.run(init)
-        saver.restore(sess, INCEPTION_CKPT)
+        assign_fn = tf.contrib.framework.assign_from_checkpoint_fn(INCEPTION_CKPT, cnn_vars, ignore_missing_vars=True, reshape_variables=False)
+        assign_fn(sess)
         losses = net.fit(sess, saver)
