@@ -67,9 +67,10 @@ class CNN(object):
         (train_x, train_y), (test_x, test_y) = cub.get_data(train_test_files)
         train_x = tf.constant(train_x)
         train_y = tf.one_hot(tf.constant(train_y), 200)
-        train_y = tf.constant(train_y)
+        #train_y = tf.constant(train_y)
         test_x  = tf.constant(test_x)
-        test_y  = tf.constant(test_y)
+        #test_y  = tf.constant(test_y)
+        test_y = tf.one_hot(tf.constant(test_y), 200)
 
         train_data = tf.data.Dataset.from_tensor_slices((train_x, train_y))
         train_data = train_data.map(lambda x, y: self.preprocess_image(x, y, True)).batch(self.batch_size)
@@ -126,7 +127,9 @@ class CNN(object):
             #train_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
             #train_vars = [v for v in train_vars if ('InceptionV3' not in v.name)]
             print('train vars:', train_vars)
-            train_op = optimizer.minimize(loss, self.global_step, var_list=train_vars)
+            update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+            with tf.control_dependencies(update_ops):
+                train_op = optimizer.minimize(loss, self.global_step, var_list=train_vars)
         return train_op
 
     def add_loss_op(self, logits, y):
@@ -155,8 +158,9 @@ class CNN(object):
         with tf.name_scope('predictions'):
             predictions = tf.argmax(tf.nn.softmax(logits), 1)
         if y != None:
+            labels = tf.argmax(y, 1)
             with tf.name_scope('accuracy'):
-                correct_preds = tf.equal(tf.cast(predictions, tf.int32), y)
+                correct_preds = tf.equal(tf.cast(predictions, tf.int32), tf.cast(labels, tf.int32))
                 accuracy_op = tf.reduce_mean(tf.cast(correct_preds, tf.float32))
         return predictions, accuracy_op
 
@@ -228,21 +232,19 @@ if __name__ == "__main__":
     args = parser.parse_args()
     net = CNN(args)
     init = tf.global_variables_initializer()
-    update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
 
-    with tf.control_dependencies(update_ops):
-        config = tf.ConfigProto()
-        config.gpu_options.allow_growth = True
-        sess = tf.Session(config=config)
-        cnn_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='InceptionV3')
-        cnn_vars = [v for v in cnn_vars if 'Adam' not in v.name]
-        cnn_vars = [v for v in cnn_vars if 'Logits' not in v.name]
-        cnn_vars = [v for v in cnn_vars if 'weights' in v.name]
-        #cnn_vars = [v for v in cnn_vars if 'BatchNorm' not in v.name]
-        print('cnn_vars:', cnn_vars)
-        saver    = tf.train.Saver(var_list=cnn_vars, max_to_keep=5)
-        #print('cnn vars:', cnn_vars)
-        sess.run(init)
-        assign_fn = tf.contrib.framework.assign_from_checkpoint_fn(INCEPTION_CKPT, cnn_vars, ignore_missing_vars=True, reshape_variables=False)
-        assign_fn(sess)
-        losses = net.fit(sess, saver)
+    config = tf.ConfigProto()
+    config.gpu_options.allow_growth = True
+    sess = tf.Session(config=config)
+    cnn_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='InceptionV3')
+    cnn_vars = [v for v in cnn_vars if 'Adam' not in v.name]
+    cnn_vars = [v for v in cnn_vars if 'Logits' not in v.name]
+    cnn_vars = [v for v in cnn_vars if 'weights' in v.name]
+    #cnn_vars = [v for v in cnn_vars if 'BatchNorm' not in v.name]
+    #print('cnn_vars:', cnn_vars)
+    saver    = tf.train.Saver(var_list=cnn_vars, max_to_keep=5)
+    
+    sess.run(init)
+    assign_fn = tf.contrib.framework.assign_from_checkpoint_fn(INCEPTION_CKPT, cnn_vars, ignore_missing_vars=True, reshape_variables=False)
+    assign_fn(sess)
+    losses = net.fit(sess, saver)
