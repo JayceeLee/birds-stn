@@ -27,7 +27,7 @@ parser.add_argument('--unpause', action='store_true', default=False)
 
 parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate step-size')
 parser.add_argument('--batch_size', type=int, default=32)
-parser.add_argument('--num_max_epochs', type=int, default=100)
+parser.add_argument('--num_max_epochs', type=int, default=1000)
 parser.add_argument('--image_dim', type=int, default=(244, 244, 3))
 parser.add_argument('--num_steps_per_checkpoint', type=int, default=100, help='Number of steps between checkpoints')
 
@@ -66,6 +66,7 @@ class CNN(object):
         train_test_files = [os.path.join(CURRENT_DIR, 'utils/train.txt'), os.path.join(CURRENT_DIR, 'utils/test.txt')]
         (train_x, train_y), (test_x, test_y) = cub.get_data(train_test_files)
         train_x = tf.constant(train_x)
+        train_y = tf.one_hot(tf.constant(train_y), 200)
         train_y = tf.constant(train_y)
         test_x  = tf.constant(test_x)
         test_y  = tf.constant(test_y)
@@ -93,7 +94,8 @@ class CNN(object):
         height, width, channels = self.image_dim
         with tf.name_scope('data'):
             self.x_placeholder = tf.placeholder(tf.float32, shape=(None, height, width, channels), name='features')
-            self.y_placeholder = tf.placeholder(tf.int32, shape=None, name='labels')
+            self.y_placeholder = tf.placeholder(tf.int32, shape=(None, 200), name='labels') # one hots
+            #self.y_placeholder = tf.placeholder(tf.int32, shape=(None), name='labels') # one hots
             self.is_training_placeholder = tf.placeholder(tf.bool, name='is_training')
 
     def create_feed_dict(self, x, y, is_training):
@@ -129,7 +131,10 @@ class CNN(object):
 
     def add_loss_op(self, logits, y):
         with tf.name_scope('loss'):
-            entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=y, logits=logits)
+            entropy = tf.nn.softmax_cross_entropy_with_logits(labels=y, logits=logits)
+            # Note: in process of changing from int labels to one-hot labels to allow for label_smoothing and weight as given in link below
+            # TODO: add loss for AuxLogits, see: https://github.com/tensorflow/models/blob/master/research/slim/train_image_classifier.py
+            #entropy = tf.losses.sparse_softmax_cross_entropy(labels=y, logits=logits)
             loss = tf.reduce_mean(entropy, name='loss')
         with tf.name_scope('summaries'):
             tf.summary.scalar('loss', loss)
@@ -232,7 +237,11 @@ if __name__ == "__main__":
         cnn_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='InceptionV3')
         cnn_vars = [v for v in cnn_vars if 'Adam' not in v.name]
         cnn_vars = [v for v in cnn_vars if 'Logits' not in v.name]
+        cnn_vars = [v for v in cnn_vars if 'weights' in v.name]
+        #cnn_vars = [v for v in cnn_vars if 'BatchNorm' not in v.name]
+        print('cnn_vars:', cnn_vars)
         saver    = tf.train.Saver(var_list=cnn_vars, max_to_keep=5)
+        #print('cnn vars:', cnn_vars)
         sess.run(init)
         assign_fn = tf.contrib.framework.assign_from_checkpoint_fn(INCEPTION_CKPT, cnn_vars, ignore_missing_vars=True, reshape_variables=False)
         assign_fn(sess)
