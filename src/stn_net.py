@@ -26,6 +26,7 @@ parser.add_argument('--output_dir', type=str, default=os.path.join(CURRENT_DIR, 
 parser.add_argument('--log_dir', type=str, default=os.path.join(CURRENT_DIR, '../logs'))
 parser.add_argument('--checkpoint', type=str, default=None)
 parser.add_argument('--unpause', action='store_true', default=False)
+parser.add_argument('--save', action='store_true', default=False)
 
 parser.add_argument('--lr', type=float, default=0.01, help='Learning rate step-size')
 parser.add_argument('--batch_size', type=int, default=32) # TODO: see if you can fit 256
@@ -46,6 +47,7 @@ class CNN(object):
         self.output_dir = config.output_dir + '/' + subdir
         self.data_dir = config.data_dir
         self.checkpoint = config.checkpoint
+        self.save = config.save
 
         self.lr = config.lr
         self.batch_size = config.batch_size
@@ -74,9 +76,11 @@ class CNN(object):
         test_y = tf.one_hot(tf.constant(test_y), 200)
 
         train_data = tf.data.Dataset.from_tensor_slices((train_x, train_y))
-        train_data = train_data.map(lambda x, y: self.preprocess_image(x, y, True)).batch(self.batch_size)
+        train_data = train_data.map(lambda x, y: self.preprocess_image(x, y, True))
+        train_data = train_data.apply(tf.contrib.data.batch_and_drop_remainder(self.batch_size))
         test_data  = tf.data.Dataset.from_tensor_slices((test_x, test_y))
-        test_data  = test_data.map(lambda x, y: self.preprocess_image(x, y, False)).batch(self.batch_size)
+        test_data  = test_data.map(lambda x, y: self.preprocess_image(x, y, False))
+        test_data = test_data.apply(tf.contrib.data.batch_and_drop_remainder(self.batch_size))
 
         self.iterator = tf.data.Iterator.from_structure(train_data.output_types, train_data.output_shapes)
         self.next_batch = self.iterator.get_next()
@@ -108,21 +112,29 @@ class CNN(object):
 
     def add_model(self, images, is_training):
         # get predicated theta values
+        tf.summary.image("original", images, self.batch_size, collections=None)
         theta = self.localizer.localize(images, is_training)
         theta1, theta2 = tf.split(theta, num_or_size_splits=2, axis=1)
         theta1, theta2 = tf.reshape(theta1, [-1, 2, 1]), tf.reshape(theta2, [-1, 2, 1])
-        print('theta1:', theta1.get_shape(), 'theta2:', theta2.get_shape())
+        tf.summary.histogram('histogram_theta1', theta1)
+        tf.summary.histogram('histogram_theta2', theta2)
+        tf.summary.scalar('max_theta1', tf.reduce_max(theta1))
+        tf.summary.scalar('max_theta2', tf.reduce_max(theta2))
+        tf.summary.scalar('min_theta1', tf.reduce_min(theta1))
+        tf.summary.scalar('min_theta2', tf.reduce_min(theta2))
+        # clamp between 0 and 1
+        theta1 = tf.div(tf.subtract(theta1, tf.reduce_min(theta1)), tf.subtract(tf.reduce_max(theta1), tf.reduce_min(theta1)))
+        theta2 = tf.div(tf.subtract(theta2, tf.reduce_min(theta2)), tf.subtract(tf.reduce_max(theta2), tf.reduce_min(theta2)))
         # add the fixed size scale transform parameters
         theta_scale = tf.eye(2, batch_shape=[self.batch_size]) * 0.5
-        print('theta_scale:', theta_scale)
         theta1 = tf.concat([theta_scale, theta1], axis=2)
         theta2 = tf.concat([theta_scale, theta2], axis=2)
         # flatten thetas for transform
         theta1, theta2 = tf.reshape(theta1, [self.batch_size, 6]), tf.reshape(theta2, [self.batch_size, 6])
         transform1 = transform(images, theta1, out_size=(224, 224))
         transform2 = transform(images, theta2, out_size=(224, 224))
-        tf.summary.image("transform1", transform1, self.batch_size, collections=None)
-        tf.summary.image("transform2", transform2, self.batch_size, collections=None)
+        tf.summary.image('transform1', transform1, self.batch_size, collections=None)
+        tf.summary.image('transform2', transform2, self.batch_size, collections=None)
         # extract features
         with tf.contrib.framework.arg_scope(inception_v2_arg_scope()):
             _, end_points1 = inception_v2(transform1, num_classes=None, is_training=is_training)
@@ -130,13 +142,14 @@ class CNN(object):
         features1 = tf.squeeze(end_points1['AvgPool_1a'], axis=[1,2], name='feats1')
         features2 = tf.squeeze(end_points2['AvgPool_1a'], axis=[1,2], name='feats2')
         features  = tf.concat([features1, features2], axis=1)
-        logits   = tf.layers.dense(features, 200, name='feats2out')
+        dropout   = tf.nn.dropout(features, 0.7)
+        logits   = tf.layers.dense(dropout, 200, name='feats2out')
         return logits
 
     def add_training_op(self, loss):
         with tf.name_scope('optimizer'):
-            optimizer_inception = tf.train.AdamOptimizer(self.lr)
-            optimizer_localizer = tf.train.AdamOptimizer(self.lr * 1e-4)
+            optimizer_inception = tf.train.GradientDescentOptimizer(self.lr)
+            optimizer_localizer = tf.train.GradientDescentOptimizer(self.lr * 1e-4)
             self.global_step = tf.train.get_or_create_global_step()
             inception_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='localize')
             localizer_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='InceptionV2')
@@ -214,7 +227,7 @@ class CNN(object):
                 self.lr = self.lr * 0.1
 
             # save every 10 epochs
-            if (i + 1) % 10 == 0:
+            if (i + 1) % 10 == 0 and self.save:
                 saver.save(sess, self.checkpoint_dir, step)
 
             # evaluate on 100 batches of test set
