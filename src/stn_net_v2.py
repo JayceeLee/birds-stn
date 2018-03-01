@@ -28,7 +28,7 @@ parser.add_argument('--checkpoint', type=str, default=None)
 parser.add_argument('--unpause', action='store_true', default=False)
 parser.add_argument('--save', action='store_true', default=False)
 
-parser.add_argument('--lr', type=float, default=0.01, help='Learning rate step-size')
+parser.add_argument('--lr', type=float, default=0.1, help='Learning rate step-size')
 parser.add_argument('--batch_size', type=int, default=32) # TODO: see if you can fit 256
 parser.add_argument('--num_max_epochs', type=int, default=1500)
 parser.add_argument('--image_dim', type=int, default=(244, 244, 3)) # TODO: change to 448
@@ -89,11 +89,16 @@ class CNN(object):
         self.test_init_op  = self.iterator.make_initializer(test_data)
 
     def preprocess_image(self, image_path, y, is_training):
+        '''When training, we utilised conventional augmentation in the form of
+        random sampling (224 × 224 from 256 × S and 448 × 448 from 512 × S where S is the largest
+        image side) and horizontal flipping. The localisation net was initialised to tile the image plane with
+        the spatial transformer crops.'''
         height, width, channels = self.image_dim
         image_file    = tf.read_file(image_path)
         image_decoded = tf.image.decode_jpeg(image_file, channels=channels)
         image_resized = preprocess_image(image_decoded, height, width, is_training)
-        return image_resized, y
+        image_normalized = tf.image.per_image_standardization(image_resized)
+        return image_normalized, y
 
     def add_placeholders(self):
         height, width, channels = self.image_dim
@@ -123,8 +128,8 @@ class CNN(object):
         tf.summary.scalar('min_theta1', tf.reduce_min(theta1))
         tf.summary.scalar('min_theta2', tf.reduce_min(theta2))
         # clamp between 0 and 1
-        theta1 = tf.div(tf.subtract(theta1, tf.reduce_min(theta1)), tf.subtract(tf.reduce_max(theta1), tf.reduce_min(theta1)))
-        theta2 = tf.div(tf.subtract(theta2, tf.reduce_min(theta2)), tf.subtract(tf.reduce_max(theta2), tf.reduce_min(theta2)))
+        #theta1 = tf.div(tf.subtract(theta1, tf.reduce_min(theta1)), tf.subtract(tf.reduce_max(theta1), tf.reduce_min(theta1)))
+        #theta2 = tf.div(tf.subtract(theta2, tf.reduce_min(theta2)), tf.subtract(tf.reduce_max(theta2), tf.reduce_min(theta2)))
         # add the fixed size scale transform parameters
         theta_scale = tf.eye(2, batch_shape=[self.batch_size]) * 0.5
         theta1 = tf.concat([theta_scale, theta1], axis=2)

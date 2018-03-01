@@ -4,9 +4,11 @@ import sys
 
 sys.path.append('/home/jason/models/research/slim/')
 from nets.inception_v2 import *
+from nets.inception_v3 import *
 from tensorflow.contrib import slim
 
-INCEPTION_CKPT = '/home/jason/models/checkpoints/inception_v2.ckpt'
+INCEPTION_V2_CKPT = '/home/jason/models/checkpoints/inception_v2.ckpt'
+INCEPTION_V3_CKPT = '/home/jason/temp/cub_image_experiment/logdir/model.ckpt'
 
 def transform(U, theta, out_size, name='transform'):
     """Spatial Transformer Layer
@@ -278,7 +280,7 @@ class LocalizerRNN:
             return h_fc_loc2
 
 
-class LocalizerInception(object):
+class LocalizerInceptionV2(object):
     """ Implements a 3DOF inception base localizer network with theta_dim output layer
     """
 
@@ -320,10 +322,59 @@ class LocalizerInception(object):
                 return out
 
 
+class LocalizerInceptionV3(object):
+    """ Implements a 3DOF inception base localizer network with theta_dim output layer
+    """
+
+    def __init__(self, num_keys, theta_dim, batch_size, reuse=False, name='localizer'):
+        self.theta_dim = theta_dim # number of transform parameters (x, y)
+        self.num_keys  = num_keys  # number of attention glimpes
+        self.batch_size = batch_size
+        self.name = name
+        self.reuse = reuse
+
+    def localize(self, x, is_training):
+        """Creates an inception localization network with added FC final layer to estimate transform params
+        Args:
+            x: A tensor of shape (batch_size, n_features)
+
+        Returns:
+            h_fc_loc2: A tensor of shape (batch_size, theta_dimxnum_keys)
+
+        """
+        # TODO: this is going to cause a problem when finding variables
+        with tf.variable_scope('localize', reuse=self.reuse):
+            with tf.contrib.framework.arg_scope(inception_v3_arg_scope()):
+                logits, end_points = inception_v3(x, num_classes=None, is_training=is_training)
+            with tf.variable_scope('added_layers'):
+                # feats with dim 8x8x2048b
+                inception_features = end_points['Mixed_7c']
+                print('localize feats:', inception_features.get_shape())
+                # TODO: not sure if there should be activations between layers
+                # 1 x 1 conv with 128 out channels
+                conv = tf.layers.conv2d(inputs=inception_features, filters=128, kernel_size=[1, 1], padding="same", activation=tf.nn.relu, name='added_1x1conv')
+                print('localize conv:', conv.get_shape())
+                # FC layer with 128 dim output (8x8x128 -> 128)
+                conv_flat = tf.reshape(conv, [self.batch_size, -1])
+                fc   = tf.layers.dense(inputs=conv_flat, units=128, activation=tf.nn.relu, name='added_fc')
+                print('localize fc:', fc.get_shape())
+                # top left (-1, -1), top right (1, -1), bottom left (-1, -1), bottom right(1, 1)
+                # set bias term to tile the image
+                if self.num_keys == 2:
+                    value = [-0.5, 0.0, 0.5, 0.0] # middle of image
+                elif self.num_keys == 4:
+                    value = [-0.5, -0.5, 0.5, -0.5, -0.5, 0.5, 0.5, 0.5] # four corners of image
+                init = tf.constant_initializer(value)
+                # FC layer that outputs theta params
+                out  = tf.layers.dense(inputs=fc, units=self.theta_dim*self.num_keys, bias_initializer=tf.zeros_initializer(), activation=tf.nn.tanh, name='added_out')
+                print('localize out:', out.get_shape())
+                return out
+
+
 if __name__ == '__main__':
     # TODO: test Inception Localizer
     x   = tf.placeholder(tf.float32, shape=[None, 224, 224, 3])
-    net = LocalizerInception(2, 2)
+    net = LocalizerInceptionV2(2, 2)
     out = net.localize(x, is_training=True)
     init = tf.global_variables_initializer()
     config = tf.ConfigProto()
@@ -335,7 +386,8 @@ if __name__ == '__main__':
     cnn_vars = {v.name.split('localize/')[1][0:-2] : v  for v in cnn_vars}
     print('cnn_vars:', cnn_vars)
     #sess.run(init)
-    assign_fn = tf.contrib.framework.assign_from_checkpoint_fn(INCEPTION_CKPT, cnn_vars, ignore_missing_vars=False, reshape_variables=False)
+    assign_fn = tf.contrib.framework.assign_from_checkpoint_fn(INCEPTION_V2_CKPT, cnn_vars, ignore_missing_vars=False, reshape_variables=False)
     assign_fn(sess)
+
 
 
