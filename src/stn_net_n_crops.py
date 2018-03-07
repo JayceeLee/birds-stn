@@ -27,10 +27,10 @@ parser.add_argument('--output_dir', type=str, default=os.path.join(CURRENT_DIR, 
 parser.add_argument('--log_dir', type=str, default=os.path.join(CURRENT_DIR, '../logs'))
 parser.add_argument('--checkpoint', type=str, default=None)
 parser.add_argument('--unpause', action='store_true', default=False)
-parser.add_argument('--save', action='store_true', default=False)
+parser.add_argument('--save', action='store_true', default=True)
 
-parser.add_argument('--lr', type=float, default=0.01, help='Learning rate step-size')
-parser.add_argument('--stn_lr', type=float, default=0.001, help='Learning rate step-size for STN')
+parser.add_argument('--lr', type=float, default=0.1, help='Learning rate step-size')
+#parser.add_argument('--stn_lr', type=float, default=0.001, help='Learning rate step-size for STN')
 parser.add_argument('--batch_size', type=int, default=32) # TODO: see if you can fit 256
 parser.add_argument('--num_max_epochs', type=int, default=1500)
 parser.add_argument('--image_dim', type=int, default=(244, 244, 3)) # TODO: change to 448
@@ -42,8 +42,8 @@ class CNN(object):
     def __init__(self, config):
         date_time = datetime.today().strftime('%Y%m%d_%H%M%S')
         data = 'cubirds'
-        hyper_params = 'lr_'+str(config.lr)+'_stn_lr_'+str(config.stn_lr)+'_max_ep_'+str(config.num_max_epochs)+'_data_'+str(data)
-        subdir = date_time + '_stn_2key_v3_' + hyper_params # this version uses inception v3
+        hyper_params = 'lr_'+str(config.lr)+'_max_ep_'+str(config.num_max_epochs)+'_data_'+str(data)
+        subdir = date_time + '_stn_unfroze_v3_' + hyper_params # this version uses inception v3 unfrozen
 
         self.log_dir = config.log_dir + '/' + subdir
         self.checkpoint_dir = config.checkpoint_dir + '/' + subdir
@@ -53,7 +53,7 @@ class CNN(object):
         self.save = config.save
 
         self.lr = config.lr
-        self.stn_lr = config.stn_lr
+        #self.stn_lr = config.stn_lr
         self.batch_size = config.batch_size
         self.num_max_epochs = config.num_max_epochs
         self.image_dim = config.image_dim
@@ -121,9 +121,9 @@ class CNN(object):
         tf.summary.image("original", images, self.batch_size, collections=None)
         # contains n*2 params for n transforms
         theta = self.localizer.localize(images, is_training)
-        theta_list = tf.split(theta, num_or_size_splits=self.num_crops, axis=1)
         # print theta's over time
-        theta_list = tf.Print(theta_list, theta_list, "theta-transform-parameters:")
+        self.theta = theta
+        theta_list = tf.split(theta, num_or_size_splits=self.num_crops, axis=1)
         transform_list = []
         # transform the images using theta
         for i in range(len(theta_list)):
@@ -139,27 +139,28 @@ class CNN(object):
             tf.summary.image('transform_'+str(i), transform_i, self.batch_size, collections=None)
         # extract features
         features_list = []
-        with tf.contrib.framework.arg_scope(inception_v3_arg_scope()):
-            for i in range(len(transform_list)):
-                reuse = True if i > 0 else False
-                transform_i = transform_list[i]
-                _, end_points_i = inception_v3(transform_i, num_classes=None, is_training=is_training, reuse=reuse)
-                # TODO: check if this should be changed to something other than AbgPool_1a
-                features_i = tf.squeeze(end_points_i['AvgPool_1a'], axis=[1,2], name='feats'+str(i))
-                features_list.append(features_i)
-        features = tf.concat(features_list, axis=1)
-        dropout = tf.nn.dropout(features, 0.7)
-        with tf.variable_scope('final_out'):
-            logits = tf.layers.dense(dropout, 200, name='feats2out')
+        with tf.variable_scope('classifier'):
+            with tf.contrib.framework.arg_scope(inception_v3_arg_scope()):
+                for i in range(len(transform_list)):
+                    reuse = True if i > 0 else False
+                    transform_i = transform_list[i]
+                    _, end_points_i = inception_v3(transform_i, num_classes=None, is_training=is_training, reuse=reuse)
+                    # TODO: check if this should be changed to something other than AbgPool_1a
+                    features_i = tf.squeeze(end_points_i['AvgPool_1a'], axis=[1,2], name='feats'+str(i))
+                    features_list.append(features_i)
+            features = tf.concat(features_list, axis=1)
+            dropout = tf.nn.dropout(features, 0.7)
+            with tf.variable_scope('final_out'):
+                logits = tf.layers.dense(dropout, 200, name='feats2out')
         return logits
 
     def add_training_op(self, loss):
         with tf.name_scope('optimizer'):
             self.global_step = tf.train.get_or_create_global_step()
             optimizer_out = tf.train.GradientDescentOptimizer(self.lr)
-            out_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='final_out')
-            optimizer_localizer = tf.train.GradientDescentOptimizer(self.stn_lr)
-            localizer_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='localize/added_layers')
+            out_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='classifier')
+            optimizer_localizer = tf.train.GradientDescentOptimizer(self.lr * 1e-4)
+            localizer_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='localize')
             # add update ops for batch norm, note this causes crash if done in main
             update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
             with tf.control_dependencies(update_ops):
@@ -219,10 +220,10 @@ class CNN(object):
                 try:
                     batch_x, batch_y = sess.run(self.next_batch)
                     feed_dict = self.create_feed_dict(batch_x, batch_y, True)
-                    _, loss, summary, step = sess.run([self.train_op, self.loss, self.loss_summary, self.global_step], feed_dict=feed_dict)
+                    _, loss, summary, step, theta = sess.run([self.train_op, self.loss, self.loss_summary, self.global_step, self.theta], feed_dict=feed_dict)
                     ave_loss += loss
                     count    += 1.0
-                    print('batch i:', count, 'loss:', loss)
+                    print('batch i:', count, 'loss:', loss, 'theta:', theta)
                     self.summary_writer.add_summary(summary, step)
                     losses.append(loss)
                 except tf.errors.OutOfRangeError:

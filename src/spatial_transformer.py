@@ -350,13 +350,14 @@ class LocalizerInceptionV3(object):
                 # feats with dim 8x8x2048b
                 inception_features = end_points['Mixed_7c']
                 print('localize feats:', inception_features.get_shape())
-                # TODO: not sure if there should be activations between layers
+                # TODO: may not need to initalize all to 0
                 # 1 x 1 conv with 128 out channels
-                conv = tf.layers.conv2d(inputs=inception_features, filters=128, kernel_size=[1, 1], padding="same", activation=tf.nn.relu, name='added_1x1conv')
+                conv = tf.layers.conv2d(inputs=inception_features, filters=128, kernel_size=[1, 1], padding="same", \
+                                        activation=tf.nn.relu, name='added_1x1conv')
                 print('localize conv:', conv.get_shape())
                 # FC layer with 128 dim output (8x8x128 -> 128)
                 conv_flat = tf.reshape(conv, [self.batch_size, -1])
-                fc   = tf.layers.dense(inputs=conv_flat, units=128, activation=tf.nn.relu, name='added_fc')
+                fc = tf.layers.dense(inputs=conv_flat, units=128, activation=tf.nn.relu, name='added_fc')
                 print('localize fc:', fc.get_shape())
                 # top left (-1, -1), top right (1, -1), bottom left (-1, -1), bottom right(1, 1)
                 # set bias term to tile the image
@@ -366,8 +367,10 @@ class LocalizerInceptionV3(object):
                     value = [-0.5, -0.5, 0.5, -0.5, -0.5, 0.5, 0.5, 0.5] # four corners of image
                 init = tf.constant_initializer(value)
                 # FC layer that outputs theta params
-                out  = tf.layers.dense(inputs=fc, units=self.theta_dim*self.num_keys, bias_initializer=tf.zeros_initializer(), activation=tf.nn.tanh, name='added_out')
+                out  = tf.layers.dense(inputs=fc, units=self.theta_dim*self.num_keys, bias_initializer=init, \
+                                        kernel_initializer=tf.zeros_initializer(), activation=tf.nn.tanh, name='added_out')
                 print('localize out:', out.get_shape())
+                print(out)
                 return out
 
 
