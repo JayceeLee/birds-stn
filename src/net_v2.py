@@ -25,13 +25,11 @@ parser.add_argument('--log_dir', type=str, default=os.path.join(CURRENT_DIR, '..
 parser.add_argument('--checkpoint', type=str, default=None)
 parser.add_argument('--unpause', action='store_true', default=False)
 
-parser.add_argument('--lr', type=float, default=1e-1, help='Learning rate step-size')
+parser.add_argument('--lr', type=float, default=0.001, help='Learning rate step-size')
 parser.add_argument('--batch_size', type=int, default=32) # TODO: see if you can fit 256
-parser.add_argument('--num_max_epochs', type=int, default=1000)
+parser.add_argument('--num_max_epochs', type=int, default=1500)
 parser.add_argument('--image_dim', type=int, default=(244, 244, 3))
 parser.add_argument('--num_steps_per_checkpoint', type=int, default=100, help='Number of steps between checkpoints')
-
-
 # this version uses inception v2
 
 
@@ -187,6 +185,10 @@ class CNN(object):
                    print('average loss:', ave_loss/count, 'epoch:', i)
                    break
 
+            # learning rate schedule assuming ~ 20 iterations per epoch
+            if (i + 1) % 500 == 0 or (i + 1) % 1000 == 0 or (i + 1) % 1250 == 0:
+                self.lr = self.lr * 0.1
+
             # save every 10 epochs
             if (i + 1) % 10 == 0:
                 saver.save(sess, self.checkpoint_dir, step)
@@ -232,7 +234,7 @@ if __name__ == "__main__":
     #cnn_vars = [v for v in cnn_vars if 'Logits' not in v.name]
     #cnn_vars = [v for v in cnn_vars if 'weights' in v.name]
     cnn_vars = [v for v in cnn_vars if 'BatchNorm' not in v.name]
-    print('cnn_vars:', cnn_vars)
+    #print('cnn_vars:', cnn_vars)
     saver    = tf.train.Saver(var_list=cnn_vars, max_to_keep=5)
     sess.run(init)
     assign_fn = tf.contrib.framework.assign_from_checkpoint_fn(INCEPTION_CKPT, cnn_vars, ignore_missing_vars=True, reshape_variables=False)

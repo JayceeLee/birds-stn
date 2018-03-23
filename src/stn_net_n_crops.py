@@ -223,7 +223,7 @@ class CNN(object):
                     _, loss, summary, step, theta = sess.run([self.train_op, self.loss, self.loss_summary, self.global_step, self.theta], feed_dict=feed_dict)
                     ave_loss += loss
                     count    += 1.0
-                    print('batch i:', count, 'loss:', loss, 'theta:', theta)
+                    print('batch i:', count, 'loss:', loss)#, 'theta:', theta)
                     self.summary_writer.add_summary(summary, step)
                     losses.append(loss)
                 except tf.errors.OutOfRangeError:

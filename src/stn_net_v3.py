@@ -148,22 +148,23 @@ class CNN(object):
         features2 = tf.squeeze(end_points2['AvgPool_1a'], axis=[1,2], name='feats2')
         features  = tf.concat([features1, features2], axis=1)
         dropout   = tf.nn.dropout(features, 0.7)
-        logits   = tf.layers.dense(dropout, 200, name='feats2out')
+        with tf.variable_scope('final_out'):
+            logits   = tf.layers.dense(dropout, 200, name='feats2out')
         return logits, penalty
 
     def add_training_op(self, loss):
         with tf.name_scope('optimizer'):
-            optimizer_inception = tf.train.GradientDescentOptimizer(self.lr)
-            optimizer_localizer = tf.train.GradientDescentOptimizer(self.lr * 1e-6)
             self.global_step = tf.train.get_or_create_global_step()
-            inception_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='localize')
-            localizer_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='InceptionV3')
+            optimizer_out = tf.train.GradientDescentOptimizer(self.lr)
+            out_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='final_out')
+            optimizer_localizer = tf.train.GradientDescentOptimizer(self.lr * 1e-4)
+            localizer_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='localize/added_layers')
             # add update ops for batch norm, note this causes crash if done in main
             update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
             with tf.control_dependencies(update_ops):
-                train_op_inception = optimizer_inception.minimize(loss, self.global_step, var_list=inception_vars)
+                train_op_out = optimizer_out.minimize(loss, self.global_step, var_list=out_vars)
                 train_op_localizer = optimizer_localizer.minimize(loss, self.global_step, var_list=localizer_vars)
-                train_op = tf.group(train_op_inception, train_op_localizer)
+                train_op = tf.group(train_op_out, train_op_localizer)
         return train_op
 
     def add_loss_op(self, logits, y, penalty):
@@ -283,7 +284,7 @@ if __name__ == "__main__":
     # combine dictionaries
     cnn_vars.update(localizer_vars)
     #print('cnn_vars:', cnn_vars)
-    saver    = tf.train.Saver(var_list=cnn_vars, max_to_keep=5)
+    saver = tf.train.Saver(var_list=cnn_vars, max_to_keep=5)
     sess.run(init)
     ckpt = tf.train.latest_checkpoint(INCEPTION_CKPT)
     assign_fn = tf.contrib.framework.assign_from_checkpoint_fn(ckpt, cnn_vars, ignore_missing_vars=True, reshape_variables=False)
