@@ -346,6 +346,7 @@ class LocalizerInceptionV3(object):
         with tf.variable_scope('localize', reuse=self.reuse):
             with tf.contrib.framework.arg_scope(inception_v3_arg_scope()):
                 logits, end_points = inception_v3(x, num_classes=None, is_training=is_training)
+                print('end points:', end_points.keys())
             with tf.variable_scope('added_layers'):
                 # feats with dim 8x8x2048b
                 inception_features = end_points['Mixed_7c']
