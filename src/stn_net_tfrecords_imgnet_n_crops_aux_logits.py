@@ -51,7 +51,8 @@ parser.add_argument('--num_max_epochs', type=int, default=1500)
 parser.add_argument('--image_dim', type=int, default=(244, 244, 3)) # TODO: change to 448
 parser.add_argument('--num_steps_per_checkpoint', type=int, default=100, help='Number of steps between checkpoints')
 parser.add_argument('--num_crops', type=int, default=2, help='Number of attention glimpses over input image')
-parser.add_argument('--image_processing', type=str, default='/home/jason/birds-stn/src/cub_image_config_train.yaml', help='Path to the image pre-processing config file')
+parser.add_argument('--image_processing_train', type=str, default='/home/jason/birds-stn/src/cub_image_config_train.yaml', help='Path to the image pre-processing config file')
+parser.add_argument('--image_processing_test', type=str, default='/home/jason/birds-stn/src/cub_image_config_test.yaml', help='Path to the image pre-processing config file')
 
 
 class CNN(object):
@@ -65,7 +66,9 @@ class CNN(object):
         self.checkpoint_dir = config.checkpoint_dir + '/' + subdir
         self.output_dir = config.output_dir + '/' + subdir
         self.data_dir = config.data_dir
-        self.preprocessing_config = config.image_processing
+        self.train_preprocessing_config = config.image_processing_train
+        self.test_preprocessing_config = config.image_processing_test
+
         self.checkpoint = config.checkpoint
         self.save = config.save
 
@@ -93,14 +96,15 @@ class CNN(object):
 
     def load_data(self):
         # TODO: look at regularization losses
-        cfg = parse_config_file(self.preprocessing_config)
+        train_cfg = parse_config_file(self.train_preprocessing_config)
+        test_cfg = parse_config_file(self.test_preprocessing_config)
         with tf.device('/cpu:0'):
             # ['original_inputs', 'inputs', 'ids', 'labels', 'text_labels', 'image', 'bboxes', 'ids']
             train_path = os.path.join(self.data_dir, 'train*')
             train_records = glob.glob(train_path)
             self.train_batch_dict = input_nodes(
                 tfrecords=train_records,
-                cfg=cfg.IMAGE_PROCESSING,
+                cfg=train_cfg.IMAGE_PROCESSING,
                 num_epochs=None, # TODO: see why this is
                 batch_size=self.batch_size,
                 num_threads=6,
@@ -111,14 +115,31 @@ class CNN(object):
                 add_summaries=True,
                 input_type='train' # note you need ones for val, test also
             )
-
-            self.batched_one_hot_labels = slim.one_hot_encoding(self.train_batch_dict['labels'], num_classes=cfg.NUM_CLASSES)
+            self.train_batched_one_hot_labels = slim.one_hot_encoding(self.train_batch_dict['labels'], num_classes=cfg.NUM_CLASSES)
+            '''
+            test_path = os.path.join(self.data_dir, 'test*')
+            test_records = glob.glob(test_path)
+            self.test_batch_dict = inputs.input_nodes(
+                tfrecords=test_path,
+                cfg=test_cfg.IMAGE_PROCESSING,
+                num_epochs=1,
+                batch_size=self.batch_size,
+                num_threads=2,
+                shuffle_batch=False,
+                random_seed=self.seed,
+                capacity=1000,
+                min_after_dequeue=200,
+                add_summaries=False,
+                input_type='test'
+            )
+            self.test_batched_one_hot_labels = slim.one_hot_encoding(batch_dict['labels'], num_classes=cfg.NUM_CLASSES)
+            '''
 
     def add_placeholders(self):
         height, width, channels = self.image_dim
         with tf.name_scope('data'):
             self.x_placeholder = self.train_batch_dict['inputs']
-            self.y_placeholder = self.batched_one_hot_labels
+            self.y_placeholder = self.train_batched_one_hot_labels
             self.is_training_placeholder = tf.placeholder(tf.bool, name='is_training')
 
     def add_model(self, images, is_training):
@@ -224,15 +245,15 @@ class CNN(object):
         logdir = self.log_dir
         self.summary_writer = tf.summary.FileWriter(logdir, graph=tf.get_default_graph())
         coord = tf.train.Coordinator()
-        threads = tf.train.start_queue_runners(coord)
+        threads = tf.train.start_queue_runners(sess=sess, coord=coord)
 
         for i in range(self.num_max_epochs):
             count    = 0.0
             ave_loss = 0.0
-            sess.run(self.train_init_op)
             while True:
                 try:
-                    _, loss, summary, step, theta = sess.run([self.train_op, self.loss, self.loss_summary, self.global_step, self.theta])
+                    feed_dict = {self.is_training_placeholder : True}
+                    _, loss, summary, step, theta = sess.run([self.train_op, self.loss, self.loss_summary, self.global_step, self.theta], feed_dict=feed_dict)
                     ave_loss += loss
                     count    += 1.0
                     print('batch i:', count, 'loss:', loss)#, 'theta:', theta)
