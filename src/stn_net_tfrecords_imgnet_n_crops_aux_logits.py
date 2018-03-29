@@ -59,7 +59,7 @@ class CNN(object):
     def __init__(self, config):
         date_time = datetime.today().strftime('%Y%m%d_%H%M%S')
         data = 'cubirds'
-        hyper_params = 'lr_'+str(config.lr)+'_max_ep_'+str(config.num_max_epochs)+'_data_'+str(data)
+        hyper_params = 'lr_'+str(config.lr)+'_max_iters_'+str(config.num_max_iters)+'_data_'+str(data)
         subdir = date_time + '_stn_unfroze_imagenet_v3_aux_logits_' + hyper_params # this version uses inception v3 unfrozen
 
         self.log_dir = config.log_dir + '/' + subdir
@@ -75,7 +75,7 @@ class CNN(object):
         self.lr = config.lr
         #self.stn_lr = config.stn_lr
         self.batch_size = config.batch_size
-        self.num_max_epochs = config.num_max_epochs
+        self.num_max_iters = config.num_max_iters
         self.image_dim = config.image_dim
         self.num_crops = config.num_crops
         self.num_classes = 200
@@ -251,7 +251,7 @@ class CNN(object):
             # run training op
             feed_dict = {self.is_training_placeholder : True}
             _, loss, summary, step, accuracy, theta = sess.run([self.train_op, self.loss, self.loss_summary, self.global_step, self.accuracy_op, self.theta], feed_dict=feed_dict)
-            print('iter:', count, 'loss:', loss, 'accuracy:', accuracy)
+            print('iter:', i, 'loss:', loss, 'accuracy:', accuracy)
             self.summary_writer.add_summary(summary, step)
             losses.append(loss)
 
