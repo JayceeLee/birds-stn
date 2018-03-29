@@ -47,7 +47,7 @@ parser.add_argument('--seed', type=float, default=1.0, help='Random seed')
 parser.add_argument('--lr', type=float, default=0.1, help='Learning rate step-size')
 #parser.add_argument('--stn_lr', type=float, default=0.001, help='Learning rate step-size for STN')
 parser.add_argument('--batch_size', type=int, default=32) # TODO: see if you can fit 256
-parser.add_argument('--num_max_epochs', type=int, default=1500)
+parser.add_argument('--num_max_iters', type=int, default=1500)
 parser.add_argument('--image_dim', type=int, default=(244, 244, 3)) # TODO: change to 448
 parser.add_argument('--num_steps_per_checkpoint', type=int, default=100, help='Number of steps between checkpoints')
 parser.add_argument('--num_crops', type=int, default=2, help='Number of attention glimpses over input image')
@@ -115,7 +115,7 @@ class CNN(object):
                 add_summaries=True,
                 input_type='train' # note you need ones for val, test also
             )
-            self.train_batched_one_hot_labels = slim.one_hot_encoding(self.train_batch_dict['labels'], num_classes=cfg.NUM_CLASSES)
+            self.train_batched_one_hot_labels = slim.one_hot_encoding(self.train_batch_dict['labels'], num_classes=train_cfg.NUM_CLASSES)
             '''
             test_path = os.path.join(self.data_dir, 'test*')
             test_records = glob.glob(test_path)
@@ -247,29 +247,21 @@ class CNN(object):
         coord = tf.train.Coordinator()
         threads = tf.train.start_queue_runners(sess=sess, coord=coord)
 
-        for i in range(self.num_max_epochs):
-            count    = 0.0
-            ave_loss = 0.0
-            while True:
-                try:
-                    feed_dict = {self.is_training_placeholder : True}
-                    _, loss, summary, step, theta = sess.run([self.train_op, self.loss, self.loss_summary, self.global_step, self.theta], feed_dict=feed_dict)
-                    ave_loss += loss
-                    count    += 1.0
-                    print('batch i:', count, 'loss:', loss)#, 'theta:', theta)
-                    self.summary_writer.add_summary(summary, step)
-                    losses.append(loss)
-                except tf.errors.OutOfRangeError:
-                   print('average loss:', ave_loss/count, 'epoch:', i)
-                   break
+        for i in range(self.num_max_iters):
+            # run training op
+            feed_dict = {self.is_training_placeholder : True}
+            _, loss, summary, step, accuracy, theta = sess.run([self.train_op, self.loss, self.loss_summary, self.global_step, self.accuracy_op, self.theta], feed_dict=feed_dict)
+            print('iter:', count, 'loss:', loss, 'accuracy:', accuracy)
+            self.summary_writer.add_summary(summary, step)
+            losses.append(loss)
 
-            # learning rate schedule assuming ~ 20 iterations per epoch
-            if (i + 1) % 500 == 0 or (i + 1) % 1000 == 0 or (i + 1) % 1250 == 0:
+            # learning rate schedule 10k, 20k, and 25k
+            if (i + 1) % 10000 == 0 or (i + 1) % 20000 == 0 or (i + 1) % 25000 == 0:
                 self.lr = self.lr * 0.1
 
-            # save every 10 epochs
-            if (i + 1) % 10 == 0 and self.save:
+            if (i + 1) % 1000 == 0 and self.save:
                 saver.save(sess, self.checkpoint_dir, step)
+        return losses
 
 if __name__ == "__main__":
     args = parser.parse_args()
