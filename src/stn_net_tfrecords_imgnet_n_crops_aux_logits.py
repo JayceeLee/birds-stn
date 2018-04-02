@@ -45,9 +45,10 @@ parser.add_argument('--save', action='store_true', default=True)
 parser.add_argument('--seed', type=float, default=1.0, help='Random seed')
 
 parser.add_argument('--lr', type=float, default=0.1, help='Learning rate step-size')
+parser.add_argument('--mode', type=str, default='test', help='train or test mode')
 #parser.add_argument('--stn_lr', type=float, default=0.001, help='Learning rate step-size for STN')
 parser.add_argument('--batch_size', type=int, default=32) # TODO: see if you can fit 256
-parser.add_argument('--num_max_iters', type=int, default=1500)
+parser.add_argument('--num_max_iters', type=int, default=300000)
 parser.add_argument('--image_dim', type=int, default=(244, 244, 3)) # TODO: change to 448
 parser.add_argument('--num_steps_per_checkpoint', type=int, default=100, help='Number of steps between checkpoints')
 parser.add_argument('--num_crops', type=int, default=2, help='Number of attention glimpses over input image')
@@ -68,6 +69,7 @@ class CNN(object):
         self.data_dir = config.data_dir
         self.train_preprocessing_config = config.image_processing_train
         self.test_preprocessing_config = config.image_processing_test
+        self.mode = config.mode
 
         self.checkpoint = config.checkpoint
         self.save = config.save
@@ -99,47 +101,48 @@ class CNN(object):
         train_cfg = parse_config_file(self.train_preprocessing_config)
         test_cfg = parse_config_file(self.test_preprocessing_config)
         with tf.device('/cpu:0'):
-            # ['original_inputs', 'inputs', 'ids', 'labels', 'text_labels', 'image', 'bboxes', 'ids']
-            train_path = os.path.join(self.data_dir, 'train*')
-            train_records = glob.glob(train_path)
-            self.train_batch_dict = input_nodes(
-                tfrecords=train_records,
-                cfg=train_cfg.IMAGE_PROCESSING,
-                num_epochs=None, # TODO: see why this is
-                batch_size=self.batch_size,
-                num_threads=6,
-                shuffle_batch=True,
-                random_seed=self.seed,
-                capacity=4000,
-                min_after_dequeue=400,  # Minimum size of the queue to ensure good shuffling
-                add_summaries=True,
-                input_type='train' # note you need ones for val, test also
-            )
-            self.train_batched_one_hot_labels = slim.one_hot_encoding(self.train_batch_dict['labels'], num_classes=train_cfg.NUM_CLASSES)
-            '''
-            test_path = os.path.join(self.data_dir, 'test*')
-            test_records = glob.glob(test_path)
-            self.test_batch_dict = inputs.input_nodes(
-                tfrecords=test_path,
-                cfg=test_cfg.IMAGE_PROCESSING,
-                num_epochs=1,
-                batch_size=self.batch_size,
-                num_threads=2,
-                shuffle_batch=False,
-                random_seed=self.seed,
-                capacity=1000,
-                min_after_dequeue=200,
-                add_summaries=False,
-                input_type='test'
-            )
-            self.test_batched_one_hot_labels = slim.one_hot_encoding(batch_dict['labels'], num_classes=cfg.NUM_CLASSES)
-            '''
+            if self.mode == 'train':
+                train_path = os.path.join(self.data_dir, 'train*')
+                train_records = glob.glob(train_path)
+                self.batch_dict = input_nodes(
+                    tfrecords=train_records,
+                    cfg=train_cfg.IMAGE_PROCESSING,
+                    num_epochs=None, # TODO: see why this is
+                    batch_size=self.batch_size,
+                    num_threads=6,
+                    shuffle_batch=True,
+                    random_seed=self.seed,
+                    capacity=4000,
+                    min_after_dequeue=400,  # Minimum size of the queue to ensure good shuffling
+                    add_summaries=True,
+                    input_type='train' # note you need ones for val, test also
+                )
+                self.batched_one_hot_labels = slim.one_hot_encoding(self.batch_dict['labels'], num_classes=train_cfg.NUM_CLASSES)
+            elif self.mode == 'test':
+                test_path = os.path.join(self.data_dir, 'test*')
+                test_records = glob.glob(test_path)
+                self.batch_dict = inputs.input_nodes(
+                    tfrecords=test_path,
+                    cfg=test_cfg.IMAGE_PROCESSING,
+                    num_epochs=1,
+                    batch_size=self.batch_size,
+                    num_threads=2,
+                    shuffle_batch=False,
+                    random_seed=self.seed,
+                    capacity=1000,
+                    min_after_dequeue=200,
+                    add_summaries=False,
+                    input_type='test'
+                )
+                self.batched_one_hot_labels = slim.one_hot_encoding(batch_dict['labels'], num_classes=cfg.NUM_CLASSES)
+                # so that we evaluate the whole dataset once and report average accuracy
+                self.num_max_iters = np.floor(test_cfg.NUM_TEST_EXAMPLES / float(self.batch_size))
 
     def add_placeholders(self):
         height, width, channels = self.image_dim
         with tf.name_scope('data'):
-            self.x_placeholder = self.train_batch_dict['inputs']
-            self.y_placeholder = self.train_batched_one_hot_labels
+            self.x_placeholder = self.batch_dict['inputs']
+            self.y_placeholder = self.batched_one_hot_labels
             self.is_training_placeholder = tf.placeholder(tf.bool, name='is_training')
 
     def add_model(self, images, is_training):
@@ -249,7 +252,7 @@ class CNN(object):
 
         for i in range(self.num_max_iters):
             # run training op
-            feed_dict = {self.is_training_placeholder : True}
+            feed_dict = {self.is_training_placeholder : self.mode == 'train'}
             _, loss, summary, step, accuracy, theta = sess.run([self.train_op, self.loss, self.loss_summary, self.global_step, self.accuracy_op, self.theta], feed_dict=feed_dict)
             print('iter:', i, 'loss:', loss, 'accuracy:', accuracy)
             self.summary_writer.add_summary(summary, step)
@@ -263,6 +266,21 @@ class CNN(object):
                 saver.save(sess, self.checkpoint_dir, step)
         return losses
 
+
+    def test(self, sess, saver):
+        coord = tf.train.Coordinator()
+        threads = tf.train.start_queue_runners(sess=sess, coord=coord)
+        ave_accuracy = 0.0
+        for i in range(self.num_max_iters):
+            feed_dict = {self.is_training_placeholder : self.mode == 'train'}
+            loss, summary, step, accuracy = sess.run([self.loss, self.loss_summary, self.global_step, self.accuracy_op], feed_dict=feed_dict)
+            ave_accuracy += accuracy
+            print('iter:', i, 'test loss:', loss, 'test accuracy:', accuracy)
+            self.summary_writer.add_summary(summary, step)
+            losses.append(loss)
+        print('ave test accuracy:', ave_accuracy)
+
+
 if __name__ == "__main__":
     args = parser.parse_args()
     net = CNN(args)
@@ -272,18 +290,29 @@ if __name__ == "__main__":
     config.gpu_options.allow_growth = True
     sess = tf.Session(config=config)
 
-    localizer_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='localize/InceptionV3')
-    # map names in checkpoint to variables to init
-    localizer_vars = {v.name.split('localize/')[1][0:-2] : v  for v in localizer_vars}
-    cnn_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='InceptionV3')
-    cnn_vars = [v for v in cnn_vars if 'Adam' not in v.name]
-    cnn_vars = [v for v in cnn_vars if 'BatchNorm' not in v.name]
-    cnn_vars = {v.name[0:-2] : v for v in cnn_vars}
-    # combine dictionaries
-    cnn_vars.update(localizer_vars)
-    #print('cnn_vars:', cnn_vars)
-    saver = tf.train.Saver(var_list=cnn_vars, max_to_keep=5)
-    sess.run(init)
-    assign_fn = tf.contrib.framework.assign_from_checkpoint_fn(INCEPTION_CKPT, cnn_vars, ignore_missing_vars=True, reshape_variables=False)
-    assign_fn(sess)
-    losses = net.fit(sess, saver)
+    if net.mode == 'train':
+        # initalize localization vars to inception pre-trained weights
+        localizer_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='localize/InceptionV3')
+        # map names in checkpoint to variables to init
+        localizer_vars = {v.name.split('localize/')[1][0:-2] : v  for v in localizer_vars}
+        cnn_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='InceptionV3')
+        cnn_vars = [v for v in cnn_vars if 'Adam' not in v.name]
+        cnn_vars = [v for v in cnn_vars if 'BatchNorm' not in v.name]
+        cnn_vars = {v.name[0:-2] : v for v in cnn_vars}
+        # combine dictionaries
+        cnn_vars.update(localizer_vars)
+        #print('cnn_vars:', cnn_vars)
+        saver = tf.train.Saver(var_list=cnn_vars, max_to_keep=5)
+        sess.run(init)
+        assign_fn = tf.contrib.framework.assign_from_checkpoint_fn(INCEPTION_CKPT, cnn_vars, ignore_missing_vars=True, reshape_variables=False)
+        assign_fn(sess)
+        losses = net.fit(sess, saver)
+    elif net.mode == 'test':
+        saver = tf.train.Saver()
+        checkpoint = tf.train.get_checkpoint_state(os.path.dirname(net.checkpoint_dir))
+        if checkpoint and checkpoint.model_checkpoint_path:
+            print('restoring from checkpoint:', checkpoint.model_checkpoint_path, ' for testing')
+            saver.restore(sess, checkpoint.model_checkpoint_path)
+        net.test(sess, saver)
+
+
