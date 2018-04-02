@@ -62,16 +62,17 @@ class CNN(object):
         hyper_params = 'lr_'+str(config.lr)+'_max_iters_'+str(config.num_max_iters)+'_data_'+str(data)
         subdir = date_time + '_mode_'+config.mode+'_stn_unfroze_imagenet_v3_aux_logits_' + hyper_params # this version uses inception v3 unfrozen
 
-        self.log_dir = config.log_dir + '/' + subdir
+        checkpoint_state = tf.train.get_checkpoint_state(config.checkpoint_dir)
+        self.checkpoint = config.checkpoint if config.checkpoint != None else checkpoint_state.model_checkpoint_path
+        self.save = config.save
+
+        self.log_dir = config.log_dir + '/' + config.mode + '/' + subdir
         self.checkpoint_dir = config.checkpoint_dir + '/' + subdir
         self.output_dir = config.output_dir + '/' + subdir
         self.data_dir = config.data_dir
         self.train_preprocessing_config = config.image_processing_train
         self.test_preprocessing_config = config.image_processing_test
         self.mode = config.mode
-
-        self.checkpoint = config.checkpoint
-        self.save = config.save
 
         self.lr = config.lr
         #self.stn_lr = config.stn_lr
@@ -113,7 +114,7 @@ class CNN(object):
                     random_seed=self.seed,
                     capacity=4000,
                     min_after_dequeue=400,  # Minimum size of the queue to ensure good shuffling
-                    add_summaries=True,
+                    add_summaries=False,
                     input_type='train' # note you need ones for val, test also
                 )
                 self.batched_one_hot_labels = slim.one_hot_encoding(self.batch_dict['labels'], num_classes=train_cfg.NUM_CLASSES)
@@ -268,9 +269,37 @@ class CNN(object):
         return losses
 
 
-    def test(self, sess, saver):
+    def test(self, sess_config, saver):
+        feed_dict = {self.is_training_placeholder : self.mode == 'train'}
+        variables_to_restore = slim.get_variables_to_restore(include=['classifier', 'localize'])
+        labels = self.batch_dict['labels']
+        metric_map = {
+            'Accuracy' : slim.metrics.streaming_accuracy(labels=labels, predictions=self.preds),
+            'Loss' : slim.metrics.streaming_mean(self.loss)
+        }
+        names_to_values, names_to_updates = slim.metrics.aggregate_metric_map(metric_map)
+        slim.evaluation.evaluation_loop(
+            master='',
+            checkpoint_dir=self.checkpoint, # path to most recent checkpoint
+            logdir=self.log_dir,
+            num_evals=self.num_max_iters,
+            initial_op=None,
+            initial_op_feed_dict=None,
+            eval_op=names_to_updates.values(),
+            eval_op_feed_dict=feed_dict,
+            final_op=None,
+            final_op_feed_dict=None,
+            summary_op=tf.summary.merge_all(),
+            summary_op_feed_dict=None,
+            variables_to_restore=variables_to_restore,
+            eval_interval_secs=60,
+            max_number_of_evaluations=None,
+            session_config=sess_config,
+            timeout=None
+        )
+        '''
         logdir = self.log_dir
-        self.summary_writer = tf.summary.FileWriter(logdir, graph=tf.get_default_graph())
+        #self.summary_writer = tf.summary.FileWriter(logdir, graph=tf.get_default_graph())
         coord = tf.train.Coordinator()
         threads = tf.train.start_queue_runners(sess=sess, coord=coord)
         ave_accuracy = 0.0
@@ -279,8 +308,9 @@ class CNN(object):
             loss, summary, step, accuracy = sess.run([self.loss, self.loss_summary, self.global_step, self.accuracy_op], feed_dict=feed_dict)
             ave_accuracy += accuracy
             print('iter:', i, 'test loss:', loss, 'test accuracy:', accuracy)
-            self.summary_writer.add_summary(summary, step)
+            #self.summary_writer.add_summary(summary, step)
         print('ave test accuracy:', ave_accuracy / float(self.num_max_iters))
+        '''
 
 
 if __name__ == "__main__":
@@ -290,7 +320,6 @@ if __name__ == "__main__":
 
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
-    sess = tf.Session(config=config)
 
     if net.mode == 'train':
         save_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='localize')
@@ -308,40 +337,20 @@ if __name__ == "__main__":
         print('cnn_vars:', cnn_vars)
         print('save vars:', save_vars)
         saver = tf.train.Saver(var_list=save_vars, max_to_keep=5)
+        sess = tf.Session(config=config)
         sess.run(init)
         assign_fn = tf.contrib.framework.assign_from_checkpoint_fn(INCEPTION_CKPT, cnn_vars, ignore_missing_vars=True, reshape_variables=False)
         assign_fn(sess)
         losses = net.fit(sess, saver)
-
-    else:
-        # initalize localization vars to inception pre-trained weights
-        localizer_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='localize/InceptionV3')
-        # map names in checkpoint to variables to init
-        localizer_vars = {v.name.split('localize/')[1][0:-2] : v  for v in localizer_vars}
-        cnn_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='InceptionV3')
-        cnn_vars = [v for v in cnn_vars if 'Adam' not in v.name]
-        cnn_vars = [v for v in cnn_vars if 'BatchNorm' not in v.name]
-        cnn_vars = {v.name[0:-2] : v for v in cnn_vars}
-        # combine dictionaries
-        cnn_vars.update(localizer_vars)
-        print('cnn_vars:', cnn_vars)
-        saver = tf.train.Saver()
-        sess.run(tf.local_variables_initializer())
-        sess.run(init) # local variables initlializer
-        checkpoint = tf.train.get_checkpoint_state(os.path.dirname(net.checkpoint_dir))
-        assign_fn = tf.contrib.framework.assign_from_checkpoint_fn(checkpoint.model_checkpoint_path, cnn_vars, ignore_missing_vars=True, reshape_variables=False)
-        assign_fn(sess)
-        net.test(sess, saver)
-
-
-    '''
     elif net.mode == 'test':
         saver = tf.train.Saver()
-        checkpoint = tf.train.get_checkpoint_state(os.path.dirname(net.checkpoint_dir))
-        if checkpoint and checkpoint.model_checkpoint_path:
-            print('restoring from checkpoint:', checkpoint.model_checkpoint_path, ' for testing')
-            saver.restore(sess, checkpoint.model_checkpoint_path)
+        net.test(config, saver)
+        '''
+        sess.run(init)
+        sess.run(tf.local_variables_initializer())
+        print(net.checkpoint)
+        if os.path.exists(net.checkpoint):
+            print('restoring from checkpoint:', net.checkpoint, ' for testing')
+            saver.restore(sess, net.checkpoint)
         net.test(sess, saver)
-    '''
-
-
+        '''
