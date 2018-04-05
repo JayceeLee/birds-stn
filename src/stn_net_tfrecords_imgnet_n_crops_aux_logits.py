@@ -63,7 +63,7 @@ class CNN(object):
         subdir = date_time + '_mode_'+config.mode+'_stn_unfroze_imagenet_v3_aux_logits_' + hyper_params # this version uses inception v3 unfrozen
 
         checkpoint_state = tf.train.get_checkpoint_state(config.checkpoint_dir)
-        self.checkpoint = config.checkpoint if config.checkpoint != None else checkpoint_state.model_checkpoint_path
+        self.checkpoint = checkpoint_state.model_checkpoint_path if checkpoint_state else config.checkpoint
         self.save = config.save
 
         self.log_dir = config.log_dir + '/' + config.mode + '/' + subdir
@@ -76,7 +76,8 @@ class CNN(object):
 
         self.lr = config.lr
         #self.stn_lr = config.stn_lr
-        self.batch_size = config.batch_size
+        self.batch_size = config.batch_size if self.mode == 'train' else 20
+        print('batch size:', self.batch_size)
         self.num_max_iters = config.num_max_iters
         self.image_dim = config.image_dim
         self.num_crops = config.num_crops
@@ -120,14 +121,14 @@ class CNN(object):
                 self.batched_one_hot_labels = slim.one_hot_encoding(self.batch_dict['labels'], num_classes=train_cfg.NUM_CLASSES)
             elif self.mode == 'test':
                 tf.logging.set_verbosity(tf.logging.DEBUG)
-                test_path = os.path.join(self.data_dir, 'test*')
+                test_path = os.path.join(self.data_dir, 'val*')#'test*')
                 test_records = glob.glob(test_path)
                 print('test records:', test_records)
                 self.batch_dict = input_nodes(
                     tfrecords=test_records,
                     cfg=test_cfg.IMAGE_PROCESSING,
-                    num_epochs=1,
-                    batch_size=test_cfg.BATCH_SIZE,
+                    num_epochs=None,
+                    batch_size=20,#test_cfg.BATCH_SIZE,
                     num_threads=test_cfg.NUM_INPUT_THREADS,
                     shuffle_batch =test_cfg.SHUFFLE_QUEUE,
                     random_seed=test_cfg.RANDOM_SEED,
@@ -138,7 +139,7 @@ class CNN(object):
                 )
                 self.batched_one_hot_labels = slim.one_hot_encoding(self.batch_dict['labels'], num_classes=test_cfg.NUM_CLASSES)
                 # so that we evaluate the whole dataset once and report average accuracy
-                self.num_max_iters = int(np.floor(test_cfg.NUM_TEST_EXAMPLES / float(self.batch_size)))
+                self.num_max_iters = 30#int(np.floor(test_cfg.NUM_TEST_EXAMPLES / float(self.batch_size)))
 
     def add_placeholders(self):
         height, width, channels = self.image_dim
@@ -148,6 +149,7 @@ class CNN(object):
             self.is_training_placeholder = tf.placeholder(tf.bool, name='is_training')
 
     def add_model(self, images, is_training):
+        print('images: ', images.get_shape())
         # get predicated theta values
         #tf.summary.image("original", images, self.batch_size, collections=None)
         # contains n*2 params for n transforms
@@ -264,35 +266,49 @@ class CNN(object):
             if (i + 1) % 10000 == 0 or (i + 1) % 20000 == 0 or (i + 1) % 25000 == 0:
                 self.lr = self.lr * 0.1
 
-            if (i + 1) % 1000 == 0 and self.save:
+            # save more often for eval purposes
+            if (i + 1) % 10 == 0 and self.save:
                 saver.save(sess, self.checkpoint_dir, step)
         return losses
 
 
     def test(self, sess_config, saver):
         feed_dict = {self.is_training_placeholder : self.mode == 'train'}
-        variables_to_restore = slim.get_variables_to_restore(include=['classifier', 'localize'])
+        variables_to_restore = slim.get_variables_to_restore()
+        variables_to_restore.append(self.global_step)
         labels = self.batch_dict['labels']
         metric_map = {
             'Accuracy' : slim.metrics.streaming_accuracy(labels=labels, predictions=self.preds),
             'Loss' : slim.metrics.streaming_mean(self.loss)
         }
         names_to_values, names_to_updates = slim.metrics.aggregate_metric_map(metric_map)
+        # Print the summaries to screen.
+        print_global_step = True
+        for name, value in names_to_values.iteritems():
+            print('looping:', name)
+            summary_name = 'eval/%s' % name
+            op = tf.summary.scalar(summary_name, value, collections=[])
+            if print_global_step:
+                op=tf.Print(op, [self.global_step], "Model Step ")
+                print_global_step = False
+            op = tf.Print(op, [value], summary_name)
+            tf.add_to_collection(tf.GraphKeys.SUMMARIES, op)
+
         slim.evaluation.evaluation_loop(
             master='',
-            checkpoint_dir=self.checkpoint, # path to most recent checkpoint
+            checkpoint_dir=os.path.join(CURRENT_DIR, '../checkpoints'), # path to most recent checkpoint
             logdir=self.log_dir,
             num_evals=self.num_max_iters,
-            initial_op=None,
+            initial_op=tf.initialize_local_variables(),
             initial_op_feed_dict=None,
             eval_op=names_to_updates.values(),
-            eval_op_feed_dict=feed_dict,
+            eval_op_feed_dict={self.is_training_placeholder : False},
             final_op=None,
             final_op_feed_dict=None,
             summary_op=tf.summary.merge_all(),
-            summary_op_feed_dict=None,
+            summary_op_feed_dict=feed_dict,
             variables_to_restore=variables_to_restore,
-            eval_interval_secs=60,
+            eval_interval_secs=30,
             max_number_of_evaluations=None,
             session_config=sess_config,
             timeout=None
@@ -336,8 +352,9 @@ if __name__ == "__main__":
         cnn_vars.update(localizer_vars)
         print('cnn_vars:', cnn_vars)
         print('save vars:', save_vars)
-        saver = tf.train.Saver(var_list=save_vars, max_to_keep=5)
-        sess = tf.Session(config=config)
+        saver = tf.train.Saver(max_to_keep=3)
+        vars_to_save = slim.get_model_variables().append(net.global_step)
+        sess = tf.Session(vars_to_save, config=config)
         sess.run(init)
         assign_fn = tf.contrib.framework.assign_from_checkpoint_fn(INCEPTION_CKPT, cnn_vars, ignore_missing_vars=True, reshape_variables=False)
         assign_fn(sess)
