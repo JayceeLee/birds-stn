@@ -358,8 +358,8 @@ class LocalizerInceptionV3(object):
                 conv = tf.layers.conv2d(inputs=inception_features, filters=128, kernel_size=[1, 1], padding="same", \
                                         activation=tf.nn.relu, name='added_1x1conv')
                 print('localize conv:', conv.get_shape())
-                # FC layer with 128 dim output (8x8x128 -> 128)
-                conv_flat = tf.reshape(conv, [self.batch_size, 8*8*128])
+                # FC layer with 128 dim output (6x6x128 -> 128)
+                conv_flat = tf.reshape(conv, [self.batch_size, 6*6*128])
                 print('conv flat:', conv_flat.get_shape())
                 fc = tf.layers.dense(inputs=conv_flat, units=128, activation=tf.nn.relu, name='added_fc')
                 print('localize fc:', fc.get_shape())
